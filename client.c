@@ -136,7 +136,7 @@ int main(int argc, char *argv[]) {
     // RDMA write with imm. after rkey invalidation
     memset(buffer, 0, PKTSZ);
     usleep(2);
-    memcpy(buffer, "After invalidating rkey", 64);
+    memcpy(buffer, "This is message after MW rkey invalidation", 64);
     memset(&sg, 0, sizeof(sg));
     memset(&wr, 0, sizeof(wr));
 

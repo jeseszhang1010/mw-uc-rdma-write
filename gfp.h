@@ -184,8 +184,11 @@ int poll_cq(struct ibv_cq *cq, struct ibv_wc *wc) {
         } else if (ret == 1) {
             if (wc->status == IBV_WC_SUCCESS) {
                 if (wc->wr_id == 100) {
-                    printf("Read a CQE for ibv_bind_mw\n");
+                    printf("Read a CQE for bind MW\n");
 		            break;
+                } else if (wc->wr_id == 200) {
+                    printf("Read a CEQ for invalidate MW rkey\n");
+                    break;
                 } else if (wc->wr_id == 10 || wc->wr_id == 11) {
                     printf("Received imm %d\n", ntohl(wc->imm_data));
 		            break;
@@ -209,9 +212,8 @@ int bind_mw_rkey(struct ib_res *ib_res, struct ibv_mw *mw, uint8_t mw_type, stru
     struct ibv_wc wc;
     int wrid = 100;
     int ret = 0;
-    long long start_time, end_time;
 
-    memset(&swr, 0, sizeof(swr));
+
     if (mw_type == IBV_MW_TYPE_2) {
     	memset(&swr, 0, sizeof(swr));
     	swr.wr_id = wrid;
@@ -220,16 +222,23 @@ int bind_mw_rkey(struct ib_res *ib_res, struct ibv_mw *mw, uint8_t mw_type, stru
     	swr.opcode = IBV_WR_BIND_MW;
     	swr.send_flags = IBV_SEND_SIGNALED;
     	swr.bind_mw.mw = mw;
+        /*
+         * after ibv_alloc_mw, mw has an initial rkey
+         * we need to assign a new key to bind_mw.rkey,
+         * then update mw'rkey with assigned rkey if getting successful CQE after post_send
+         */
+        swr.bind_mw.rkey = 264270;
     	swr.bind_mw.bind_info.mr = bind_info->mr;
     	swr.bind_mw.bind_info.addr = (uintptr_t)(bind_info->addr);
     	swr.bind_mw.bind_info.length = bind_info->length;
     	swr.bind_mw.bind_info.mw_access_flags = bind_info->mw_access_flags;
-
     	ret = ibv_post_send(ib_res->qp, &swr, &sbad_wr);
     	if (ret) {
     	    perror("ibv_post_send error");
     	    goto cleanup;
     	}
+        // update with the newly assigned rkey
+        mw->rkey = swr.bind_mw.rkey;
     } else {
     	struct ibv_mw_bind mw_bind = {
     	        .wr_id = wrid,
@@ -239,7 +248,6 @@ int bind_mw_rkey(struct ib_res *ib_res, struct ibv_mw *mw, uint8_t mw_type, stru
     		    .bind_info.length = bind_info->length,
     		    .bind_info.mw_access_flags = bind_info->mw_access_flags
     	};
-        start_time = gfp_get_time();
     	ret = ibv_bind_mw(ib_res->qp, mw, &mw_bind);
     	if (ret) {
     	    perror("ibv_bind_mw");
@@ -251,10 +259,54 @@ int bind_mw_rkey(struct ib_res *ib_res, struct ibv_mw *mw, uint8_t mw_type, stru
         perror("poll cq failed");
         goto cleanup;
     }
-    end_time = gfp_get_time();
-    printf("ibv_bind_mw + poll it's cq takes %lld nanosec\n", end_time - start_time);
     return 0;
 
+cleanup:
+    return ret;
+}
+
+int invalidate_mw_rkey(struct ib_res *ib_res, struct ibv_mw *mw, uint8_t mw_type, struct ibv_mr *mr) {
+    int ret = 0;
+    long long start_time, end_time;
+
+    start_time = gfp_get_time();
+    if (mw_type == IBV_MW_TYPE_1) {
+        struct ibv_mw_bind_info bind_info = {0};
+        // Invalidate MW type 1 with 0 length
+        bind_info.mr = mr;
+        bind_info.addr = (uintptr_t)(mr->addr);
+        bind_info.length = 0;
+        bind_info.mw_access_flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE;
+
+        ret = bind_mw_rkey(ib_res, mw, mw_type, &bind_info);
+        if (ret) {
+            perror("bind_mw and get rkey failed");
+            goto cleanup;
+        }
+        printf("Invalidated Type 1 MW's rkey\n");
+    } else {
+        struct ibv_wc wc;
+        struct ibv_send_wr inv_wr = { 0 };
+	    struct ibv_send_wr *bad_inv_wr = NULL;
+        inv_wr.wr_id = 200;
+        inv_wr.opcode = IBV_WR_LOCAL_INV;
+	    inv_wr.next = NULL;
+	    inv_wr.send_flags = IBV_SEND_SIGNALED;
+	    inv_wr.invalidate_rkey = mw->rkey;
+        ret = ibv_post_send(ib_res->qp, &inv_wr, &bad_inv_wr);
+        if (ret) {
+            perror("ibv_post_send error");
+            goto cleanup;
+        }
+        printf("Invalidated Type 1 MW's rkey\n");
+        ret = poll_cq(ib_res->cq, &wc);
+        if (ret < 0) {
+            perror("poll cq failed");
+            goto cleanup;
+        }
+    }
+    end_time = gfp_get_time();
+    printf("Invalidate Type %d MW's rkey takes %lld ns\n", mw_type, (end_time - start_time));
 cleanup:
     return ret;
 }

@@ -13,6 +13,7 @@ int main() {
     struct ibv_recv_wr rwr, *rbad_wr;
     struct ibv_wc wc;
     struct ibv_mw *mw = NULL;
+    uint8_t mw_type = IBV_MW_TYPE_2;
     int pagesize = getpagesize();
     int ret;
     long long start_time, end_time;
@@ -97,7 +98,6 @@ int main() {
     }
 
     // Create a memory window (MW) of type 1 or 2
-    uint8_t mw_type = IBV_MW_TYPE_1;
     mw = ibv_alloc_mw(ib_res.pd, mw_type);
     if (!mw) {
         perror("Couldn't allocate memory window");
@@ -153,22 +153,11 @@ int main() {
     }
     printf("buffer: %s\n", buffer);
 
-#if 0
-    // Invalidate MW type 1 with 0 length
-    bind_info.mr = mr;
-    bind_info.addr = (uintptr_t)buffer;
-    bind_info.length = 0;
-    bind_info.mw_access_flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE;
+    // Invalidate MW's rkey
+    ret = invalidate_mw_rkey(&ib_res, mw, mw_type, mr);
 
-    ret = bind_mw_rkey(&ib_res, mw, mw_type, &bind_info);
-    if (ret) {
-        perror("bind_mw and get rkey failed");
-        goto cleanup;
-    }
-    printf("Invalidated MW rkey\n");
-#endif
-
-    // Poll RDMA Write with Immediate message
+    // Poll RDMA Write with Immediate message after rkey invalidation
+    // It's expected to be hanging here as rkey invalidated
     ret = poll_cq(ib_res.cq, &wc);
     if (ret < 0) {
         perror("poll cq failed\n");
@@ -183,7 +172,7 @@ cleanup:
     start_time = gfp_get_time();
     if (mr) ibv_dereg_mr(mr);
     end_time = gfp_get_time();
-    printf("ibv_dereg_mr takes %lld nanosec\n", end_time - start_time);
+    printf("ibv_dereg_mr takes %lld ns\n", (end_time - start_time));
     if (premr) ibv_dereg_mr(premr);
     if (ib_res.qp) ibv_destroy_qp(ib_res.qp);
     if (ib_res.cq) ibv_destroy_cq(ib_res.cq);
